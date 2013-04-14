@@ -18,7 +18,7 @@
 #include "includes.h"
 
 #include "common.h"
-#include "pcsc_funcs.h"
+#include "utils/pcsc_funcs.h"
 #include "state_machine.h"
 #include "ext_password.h"
 #include "crypto/crypto.h"

@@ -9,7 +9,7 @@
 #include "includes.h"
 
 #include "common.h"
-#include "pcsc_funcs.h"
+#include "utils/pcsc_funcs.h"
 #include "crypto/milenage.h"
 #include "crypto/random.h"
 #include "eap_peer/eap_i.h"
