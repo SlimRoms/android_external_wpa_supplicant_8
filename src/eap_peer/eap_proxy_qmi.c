@@ -154,6 +154,7 @@ static unsigned int session_type;
 static Boolean wpa_qmi_register_events(int sim_num);
 static Boolean wpa_qmi_read_card_imsi(int sim_num);
 static Boolean wpa_qmi_read_card_status(int sim_num);
+static Boolean wpa_qmi_register_auth_inds(struct eap_proxy_sm *eap_proxy);
 
 #endif
 #define EAP_SUB_TYPE_SIM_START     0x0a
@@ -173,6 +174,43 @@ static void wpa_qmi_client_indication_cb
 {
         /* we currently not need the card status changes */
         /* Making this a dummy CB handler */
+}
+
+static Boolean wpa_qmi_register_auth_inds(struct eap_proxy_sm *eap_proxy)
+{
+	qmi_client_error_type               qmi_err_code      = 0;
+	auth_indication_register_resp_msg_v01  event_resp_msg;
+	auth_indication_register_req_msg_v01 event_reg_params;
+
+	/* Register for events first */
+	os_memset(&event_reg_params, 0, sizeof(auth_indication_register_req_msg_v01));
+	os_memset(&event_resp_msg, 0, sizeof(auth_indication_register_resp_msg_v01));
+
+	event_reg_params.report_eap_notification_code_valid = TRUE;
+	event_reg_params.report_eap_notification_code = 1;
+
+	wpa_printf(MSG_DEBUG, "registering for notification codes\n");
+	qmi_err_code = qmi_client_send_msg_sync(
+			eap_proxy->qmi_auth_svc_client_ptr[eap_proxy->user_selected_sim],
+			QMI_AUTH_INDICATION_REGISTER_REQ_V01,
+			(void *) &event_reg_params,
+			sizeof(auth_indication_register_req_msg_v01),
+			(void*) &event_resp_msg,
+			sizeof(auth_indication_register_resp_msg_v01),
+			WPA_UIM_QMI_DEFAULT_TIMEOUT);
+
+	if (qmi_err_code != QMI_NO_ERR ||
+	    (event_resp_msg.resp.result != QMI_RESULT_SUCCESS_V01 &&
+	     event_resp_msg.resp.error != QMI_ERR_NO_EFFECT_V01)) {
+		wpa_printf(MSG_ERROR,"QMI-ERROR Error for "
+			   "QMI_AUTH_INDICATION_REGISTER_REQ_V01, qmi_err_code=%d"
+			   "Error=%d\n", qmi_err_code,
+			    event_resp_msg.resp.error);
+		return FALSE;
+	}
+
+	return TRUE;
+
 }
 
 static Boolean wpa_qmi_register_events(int sim_num)
@@ -656,7 +694,8 @@ static void eap_proxy_post_init(void *eloop_ctx, void *timeout_ctx)
 		wpa_printf (MSG_ERROR, "eap_proxy: QMI auth service client initialized with success %p eapol_proxy=%p\n",
 				eap_proxy->qmi_auth_svc_client_ptr[index], eap_proxy);
 		flag = TRUE;
-
+		/* Register for the notifications from QMI / AUTH */
+		wpa_qmi_register_auth_inds(eap_proxy);
 #endif /* SIM_AKA_IDENTITY_IMSI */
 	}
 
@@ -836,23 +875,28 @@ static void handle_qmi_eap_ind(qmi_client_type user_handle,
 	memset(&eap_session_result, 0, sizeof(auth_eap_session_result_ind_msg_v01));
 	eap_session_result.eap_result = -1;
 	struct eap_proxy_sm *sm = (struct eap_proxy_sm *)ind_cb_data;
+
+	auth_eap_notification_code_ind_msg_v01 eap_notification;
+	memset(&eap_notification, 0, sizeof(auth_eap_notification_code_ind_msg_v01));
+
 	wpa_printf(MSG_ERROR, "eap_proxy: Handle_qmi_eap_ind msgId =%d  sm=%p\n", msg_id,sm);
 	/* Decode */
-	qmi_err = qmi_client_message_decode(user_handle, QMI_IDL_INDICATION,
-					    msg_id, (void*)ind_buf, ind_buf_len,
-					    &eap_session_result,
-					    sizeof(auth_eap_session_result_ind_msg_v01));
-	if (qmi_err != QMI_NO_ERR)
-	{
-		wpa_printf(MSG_ERROR, "eap_proxy: Error in qmi_client_message_decode;"
-				" error_code=%d \n", qmi_err);
-		sm->srvc_result = EAP_PROXY_QMI_SRVC_FAILURE;
-		return;
-	}
 
 	switch(msg_id)
 	{
 		case QMI_AUTH_EAP_SESSION_RESULT_IND_V01:
+
+			qmi_err = qmi_client_message_decode(user_handle, QMI_IDL_INDICATION,
+					msg_id, (void*)ind_buf, ind_buf_len,
+					&eap_session_result,
+					sizeof(auth_eap_session_result_ind_msg_v01));
+			if (qmi_err != QMI_NO_ERR)
+			{
+				wpa_printf(MSG_ERROR, "eap_proxy: Error in qmi_client_message_decode;"
+						" error_code=%d \n", qmi_err);
+				sm->srvc_result = EAP_PROXY_QMI_SRVC_FAILURE;
+				return;
+			}
 			if ((eap_session_result.eap_result == 0) &&
 			    (QMI_STATE_RESP_TIME_OUT != sm->qmi_state)) {
 				sm->proxy_state = EAP_PROXY_AUTH_SUCCESS;
@@ -865,6 +909,23 @@ static void handle_qmi_eap_ind(qmi_client_type user_handle,
 			}
 			sm->srvc_result = EAP_PROXY_QMI_SRVC_SUCCESS;
 			break;
+
+		case QMI_AUTH_EAP_NOTIFICATION_CODE_IND_V01:
+
+			qmi_err = qmi_client_message_decode(user_handle, QMI_IDL_INDICATION,
+					msg_id, (void*)ind_buf, ind_buf_len,
+					&eap_notification,
+					sizeof(auth_eap_notification_code_ind_msg_v01));
+			if (qmi_err != QMI_NO_ERR)
+			{
+				wpa_printf(MSG_ERROR, "eap_proxy: Error in qmi_client_message_decode;"
+						" error_code=%d \n", qmi_err);
+			}
+			sm->notification_code = eap_notification.eap_notification_code;
+			wpa_printf(MSG_ERROR, "eap_proxy: notificatio code is %x\n",
+					eap_notification.eap_notification_code);
+			break;
+
 		default:
 			wpa_printf(MSG_ERROR, "eap_proxy: An unexpected msg Id=%d"
 					" is given\n", msg_id);
@@ -1108,7 +1169,8 @@ static enum eap_proxy_status eap_proxy_process(struct eap_proxy_sm  *eap_proxy,
 						EAPOL_eapNoResp, TRUE);
 
 			wpa_msg(eap_proxy->msg_ctx, MSG_INFO, WPA_EVENT_EAP_FAILURE
-				"EAP authentication failed");
+				"EAP authentication failed notification code 0x%x",
+				eap_proxy->notification_code);
 
 			eap_proxy->is_state_changed = TRUE;
 			break;
@@ -1805,6 +1867,7 @@ static Boolean eap_proxy_build_identity(struct eap_proxy_sm *eap_proxy, u8 id, s
 		return FALSE;
 		}
 		eap_proxy->eap_auth_session_flag[sim_num] = TRUE;
+		eap_proxy->notification_code = 0;
 		eap_proxy->qmi_state = QMI_STATE_IDLE;
 		wpa_printf(MSG_ERROR, "eap_proxy: EAP session started"
 			   " error_ret=%d; Resp=%d\n", qmiRetCode,
